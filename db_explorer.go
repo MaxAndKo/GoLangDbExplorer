@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -22,11 +23,16 @@ type FieldMetaData struct {
 }
 
 type DbExplorer struct {
-	DB *sql.DB
+	DB   *sql.DB
+	Data map[string][]FieldMetaData
 }
 
-func (*DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
+func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	method := r.Method
+	if path == "/" && method == http.MethodGet {
+		d.writeTables(w)
+	}
 }
 
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
@@ -35,18 +41,18 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		return nil, err
 	}
 
-	tableNames := make(map[string][]FieldMetaData)
+	tablesData := make(map[string][]FieldMetaData)
 	for tablesRs.Next() {
 		var name string
 		if err := tablesRs.Scan(&name); err != nil {
 			return nil, err
 		}
 
-		tableNames[name] = nil
+		tablesData[name] = nil
 	}
 	tablesRs.Close()
 
-	for tableName, _ := range tableNames {
+	for tableName, _ := range tablesData {
 		fieldsRs, err := db.Query(fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`;", tableName))
 		if err != nil {
 			return nil, err
@@ -61,9 +67,30 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 			)
 			fieldMetaData = append(fieldMetaData, field)
 		}
-		tableNames[tableName] = fieldMetaData
+		tablesData[tableName] = fieldMetaData
 		fieldsRs.Close()
 	}
 
-	return &DbExplorer{DB: db}, nil
+	return &DbExplorer{DB: db, Data: tablesData}, nil
+}
+
+func (d *DbExplorer) writeTables(w http.ResponseWriter) {
+	tables := make([]string, 0, len(d.Data))
+	i := 0
+	for k, _ := range d.Data {
+		tables = append(tables, k)
+		i++
+	}
+
+	s := struct {
+		Tables []string `json:"tables"`
+	}{tables}
+
+	bytes, err := json.Marshal(struct {
+		Response interface{} `json:"response"`
+	}{s})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	w.Write(bytes)
 }
