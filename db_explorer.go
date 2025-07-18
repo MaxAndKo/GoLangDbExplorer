@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 )
 
 // тут вы пишете код
@@ -23,8 +25,9 @@ type FieldMetaData struct {
 }
 
 type DbExplorer struct {
-	DB   *sql.DB
-	Data map[string][]FieldMetaData
+	DB         *sql.DB
+	TableNames []string
+	Data       map[string][]FieldMetaData
 }
 
 func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +35,13 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := r.Method
 	if path == "/" && method == http.MethodGet {
 		d.writeTables(w)
+		return
+	}
+
+	cutFirstSlash := path[1:]
+	tableName := cutFirstSlash[:strings.Index(cutFirstSlash, "/")]
+	if !slices.Contains(d.TableNames, tableName) {
+		http.NotFound(w, r)
 	}
 }
 
@@ -71,26 +81,27 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		fieldsRs.Close()
 	}
 
-	return &DbExplorer{DB: db, Data: tablesData}, nil
+	return &DbExplorer{DB: db, Data: tablesData, TableNames: extractTableNames(tablesData)}, nil
 }
 
 func (d *DbExplorer) writeTables(w http.ResponseWriter) {
-	tables := make([]string, 0, len(d.Data))
-	i := 0
-	for k, _ := range d.Data {
-		tables = append(tables, k)
-		i++
-	}
-
-	s := struct {
-		Tables []string `json:"tables"`
-	}{tables}
-
 	bytes, err := json.Marshal(struct {
 		Response interface{} `json:"response"`
-	}{s})
+	}{struct {
+		Tables []string `json:"tables"`
+	}{d.TableNames}})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 	w.Write(bytes)
+}
+
+func extractTableNames(data map[string][]FieldMetaData) []string {
+	tables := make([]string, 0, len(data))
+	i := 0
+	for k, _ := range data {
+		tables = append(tables, k)
+		i++
+	}
+	return tables
 }
