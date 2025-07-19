@@ -31,7 +31,8 @@ type DbExplorer struct {
 	TableNames        []string
 	Data              map[string][]FieldMetaData
 	LimitOffsetRegexp *regexp.Regexp
-	ById              *regexp.Regexp
+	ByIdRegexp        *regexp.Regexp
+	GetQuery          string
 	LimitOffsetQuery  string
 	GetByIdQuery      string
 }
@@ -45,10 +46,17 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tableName := extractFuncName(path)
-	afterTable := path[len(tableName):]
+	afterTable := path[len(tableName)+1:]
 	if !slices.Contains(d.TableNames, tableName) {
 		writeError(w, "unknown table", http.StatusNotFound)
 		return
+	}
+
+	if method == http.MethodGet && afterTable == "" {
+		err := getRows(tableName, d, w)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 
 	if method == http.MethodGet && d.LimitOffsetRegexp.MatchString(afterTable) {
@@ -58,7 +66,7 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if method == http.MethodGet && d.ById.MatchString(afterTable) {
+	if method == http.MethodGet && d.ByIdRegexp.MatchString(afterTable) {
 		//getById()
 	}
 
@@ -66,25 +74,90 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		//putRow()
 	}
 
-	if method == http.MethodPost && d.ById.MatchString(afterTable) {
+	if method == http.MethodPost && d.ByIdRegexp.MatchString(afterTable) {
 		//updateRow()
 	}
 
-	if method == http.MethodDelete && d.ById.MatchString(afterTable) {
+	if method == http.MethodDelete && d.ByIdRegexp.MatchString(afterTable) {
 		//deleteRow()
 	}
 
 }
 
+func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
+	tableData := d.Data[table]
+	fieldNames := make([]string, len(tableData))
+	for i, datum := range tableData {
+		fieldNames[i] = datum.Field
+	}
+
+	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, strings.Join(fieldNames, ", "), table))
+	if err != nil {
+		return err
+	}
+	defer rs.Close()
+
+	countOfFields := len(tableData)
+
+	result := make([]map[string]interface{}, 0)
+	for rs.Next() {
+		convertedRs := make([]interface{}, countOfFields)
+		convertedRsPointers := make([]interface{}, countOfFields)
+		for i := range convertedRsPointers {
+			convertedRsPointers[i] = &convertedRs[i]
+		}
+		err := rs.Scan(convertedRsPointers...)
+		if err != nil {
+			return err
+		}
+
+		for i := range convertedRs {
+			if convertedRs[i] != nil {
+				convertedRs[i] = string(convertedRs[i].([]byte))
+			} else {
+				convertedRs[i] = nil
+			}
+		}
+
+		resultMap := make(map[string]interface{}, countOfFields)
+		for i, row := range convertedRs {
+			resultMap[fieldNames[i]] = row
+		}
+		result = append(result, resultMap)
+
+		fmt.Sprintf("")
+	}
+
+	marshal, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+
+	w.Write(marshal) //TODO писать в response - выделить общий метод для этого
+	return nil
+}
+
 func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer) error {
-	/*limit, err := extractLimitOrOffset(limitAndOffset, "limit")
+	limit, err := extractLimitOrOffset(limitAndOffset, "limit")
 	if err != nil {
 		return err
 	}
 	offset, err := extractLimitOrOffset(limitAndOffset, "offset")
 	if err != nil {
 		return err
-	}*/
+	}
+
+	rs, err := d.DB.Query(fmt.Sprintf(d.LimitOffsetQuery, table), limit, offset)
+	if err != nil {
+		return err
+	}
+	defer rs.Close()
+
+	var res interface{}
+	for rs.Next() {
+		rs.Scan(&res)
+		fmt.Sprintf("")
+	}
 
 	return nil
 }
@@ -177,7 +250,8 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		Data:              tablesData,
 		TableNames:        extractTableNames(tablesData),
 		LimitOffsetRegexp: limitOffset,
-		ById:              byId,
+		ByIdRegexp:        byId,
+		GetQuery:          "SELECT %s FROM `%s`",
 		LimitOffsetQuery:  "SELECT * FROM `%s` LIMIT ? OFFSET ?",
 		GetByIdQuery:      "SELECT * FROM `%s` WHERE `%s` = ?",
 	}, nil
