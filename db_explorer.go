@@ -37,6 +37,7 @@ type DbExplorer struct {
 	LimitOffsetQuery  string
 	GetByIdQuery      string
 	InsertQuery       string
+	UpdateQuery       string
 }
 
 func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +87,53 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if method == http.MethodPost && d.ByIdRegexp.MatchString(afterTable) {
-		//updateRow()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
+		r.Body.Close()
+		updateRow(tableName, d, w, body, afterTable)
 	}
 
 	if method == http.MethodDelete && d.ByIdRegexp.MatchString(afterTable) {
 		//deleteRow()
 	}
 
+}
+
+func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, restOfPath string) error {
+	input := make(map[string]interface{})
+	err := json.Unmarshal(body, &input)
+	if err != nil {
+		return err
+	}
+
+	idForUpdate, err := strconv.Atoi(restOfPath[1:])
+	if err != nil {
+		return err
+	}
+
+	fieldNames, fieldValues, idFieldName := createDataForQuery(d.Data[table], input)
+
+	updateExpression := make([]string, len(fieldNames))
+	for i := range fieldNames {
+		updateExpression[i] = fmt.Sprintf("%s = %s", fieldNames[i], fieldValues[i])
+	}
+
+	query := fmt.Sprintf(d.UpdateQuery,
+		table,
+		strings.Join(updateExpression, ", "),
+		idFieldName)
+
+	_, err = d.DB.Query(query, idForUpdate)
+	if err != nil {
+		return err
+	}
+
+	writeResponse(w, struct {
+		Updated int `json:"updated"`
+	}{1})
+	return nil
 }
 
 func createRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte) error {
@@ -102,25 +143,7 @@ func createRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte) 
 		return err
 	}
 
-	data := d.Data[table]
-
-	forInsertFieldNames := make([]string, 0)
-	forInsertFieldValues := make([]string, 0)
-	var idFieldName string
-	for _, datum := range data {
-		value, exists := input[datum.Field]
-		if exists && datum.Extra.String != "auto_increment" {
-			forInsertFieldNames = append(forInsertFieldNames, datum.Field)
-			if strings.Contains(datum.Type, "text") || strings.Contains(datum.Type, "var") {
-				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("'%v'", value))
-			} else {
-				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("%v", value))
-			}
-		}
-		if datum.Key.String == "PRI" {
-			idFieldName = datum.Field
-		}
-	}
+	forInsertFieldNames, forInsertFieldValues, idFieldName := createDataForQuery(d.Data[table], input)
 
 	query := fmt.Sprintf(d.InsertQuery,
 		table,
@@ -144,6 +167,27 @@ func createRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte) 
 	}{resultId})
 
 	return nil
+}
+
+func createDataForQuery(data []FieldMetaData, input map[string]interface{}) ([]string, []string, string) {
+	forInsertFieldNames := make([]string, 0)
+	forInsertFieldValues := make([]string, 0)
+	var targetName string
+	for _, datum := range data {
+		value, exists := input[datum.Field]
+		if exists && datum.Extra.String != "auto_increment" {
+			forInsertFieldNames = append(forInsertFieldNames, datum.Field)
+			if strings.Contains(datum.Type, "text") || strings.Contains(datum.Type, "var") {
+				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("'%v'", value))
+			} else {
+				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("%v", value))
+			}
+		}
+		if datum.Key.String == "PRI" {
+			targetName = datum.Field
+		}
+	}
+	return forInsertFieldNames, forInsertFieldValues, targetName
 }
 
 func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath string) error {
@@ -279,6 +323,7 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		LimitOffsetQuery:  "SELECT `%s` FROM `%s` %s %s",
 		GetByIdQuery:      "SELECT `%s` FROM `%s` WHERE `%s` = ?",
 		InsertQuery:       "INSERT INTO `%s` (`%s`) VALUES (%s) RETURNING `%s`",
+		UpdateQuery:       "UPDATE `%s` SET %s WHERE `%s` = ?",
 	}, nil
 }
 
