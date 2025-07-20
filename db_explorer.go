@@ -112,6 +112,11 @@ func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath stri
 		return err
 	}
 
+	if len(result) == 0 {
+		writeError(w, "record not found", http.StatusNotFound)
+		return nil
+	}
+
 	writeRecord(w, result[0])
 	return nil
 }
@@ -226,7 +231,10 @@ func writeTables(w http.ResponseWriter, tables []string) {
 }
 
 func writeError(w http.ResponseWriter, error string, statusCode int) {
-	http.Error(w, error, statusCode)
+	marshal, _ := json.Marshal(struct {
+		Error string `json:"error"`
+	}{error})
+	http.Error(w, string(marshal), statusCode)
 }
 
 func writeRecords(w http.ResponseWriter, records []map[string]interface{}) {
