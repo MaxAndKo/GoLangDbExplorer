@@ -61,7 +61,7 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if method == http.MethodGet && d.LimitOffsetRegexp.MatchString(queryParams) {
-		err := getWithLimitAndOffset(tableName, afterTable, d, w)
+		err := getWithLimitAndOffset(tableName, queryParams, d, w)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -87,9 +87,7 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 	tableData := d.Data[table]
-	fieldNames := extractFieldNames(tableData)
-
-	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, strings.Join(fieldNames, "`, `"), table))
+	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, getAndFormatFieldNamesForQuery(table, d), table))
 	if err != nil {
 		return err
 	}
@@ -104,16 +102,18 @@ func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 }
 
 func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer, w http.ResponseWriter) error {
-	limit, err := extractLimitOrOffset(limitAndOffset, "limit", " LIMIT %d")
+	limit, err := extractLimitOrOffset(limitAndOffset, "limit", 5)
 	if err != nil {
 		return err
 	}
-	offset, err := extractLimitOrOffset(limitAndOffset, "offset", " OFFSET %d")
+	offset, err := extractLimitOrOffset(limitAndOffset, "offset", 0)
 	if err != nil {
 		return err
 	}
 
-	rs, err := d.DB.Query(fmt.Sprintf(d.LimitOffsetQuery, table, limit, offset))
+	fieldNames := getAndFormatFieldNamesForQuery(table, d)
+	fullQuery := fmt.Sprintf(d.LimitOffsetQuery, fieldNames, table, limit, offset)
+	rs, err := d.DB.Query(fullQuery)
 	if err != nil {
 		return err
 	}
@@ -125,43 +125,6 @@ func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer, w
 
 	writeRecords(w, result)
 	return nil
-}
-
-func extractLimitOrOffset(limitAndOffset string, targetName string, resultTemplate string) (string, error) {
-	var targetValue int
-	targetIndex := strings.Index(limitAndOffset, targetName)
-	if targetIndex == -1 {
-		return "", nil
-	}
-	cutTarget := limitAndOffset[len(targetName)+1:]
-	ampersandIndex := strings.Index(cutTarget, "&")
-	if ampersandIndex == -1 {
-		var err error
-		targetValue, err = strconv.Atoi(cutTarget)
-		if err != nil {
-			return "", err
-		}
-	} else {
-		var err error
-		targetValue, err = strconv.Atoi(cutTarget[:ampersandIndex])
-		if err != nil {
-			return "", err
-		}
-	}
-
-	return fmt.Sprintf(resultTemplate, targetValue), nil
-}
-
-func extractFuncName(path string) string {
-	cutFirstSlash := path[1:]
-	tableNameEnd := strings.Index(cutFirstSlash, "/")
-	var tableName string
-	if tableNameEnd == -1 {
-		tableName = cutFirstSlash
-	} else {
-		tableName = cutFirstSlash[:tableNameEnd]
-	}
-	return tableName
 }
 
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
@@ -217,7 +180,7 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		LimitOffsetRegexp: limitOffset,
 		ByIdRegexp:        byId,
 		GetQuery:          "SELECT `%s` FROM `%s`",
-		LimitOffsetQuery:  "SELECT `%s` FROM `%s` `%s` `%s`",
+		LimitOffsetQuery:  "SELECT `%s` FROM `%s` %s %s",
 		GetByIdQuery:      "SELECT `%s` FROM `%s` WHERE `%s` = ?",
 	}, nil
 }
@@ -266,6 +229,44 @@ func extractFieldNames(tableData []FieldMetaData) []string {
 		fieldNames[i] = datum.Field
 	}
 	return fieldNames
+}
+
+func extractLimitOrOffset(limitAndOffset string, targetName string, defaultValue int) (string, error) {
+	var targetValue int
+	resultTemplate := fmt.Sprintf(" %s %%d", strings.ToUpper(targetName))
+	targetIndex := strings.Index(limitAndOffset, targetName)
+	if targetIndex == -1 {
+		return fmt.Sprintf(resultTemplate, defaultValue), nil
+	}
+	cutTarget := limitAndOffset[len(targetName)+1:]
+	ampersandIndex := strings.Index(cutTarget, "&")
+	if ampersandIndex == -1 {
+		var err error
+		targetValue, err = strconv.Atoi(cutTarget)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		targetValue, err = strconv.Atoi(cutTarget[:ampersandIndex])
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return fmt.Sprintf(resultTemplate, targetValue), nil
+}
+
+func extractFuncName(path string) string {
+	cutFirstSlash := path[1:]
+	tableNameEnd := strings.Index(cutFirstSlash, "/")
+	var tableName string
+	if tableNameEnd == -1 {
+		tableName = cutFirstSlash
+	} else {
+		tableName = cutFirstSlash[:tableNameEnd]
+	}
+	return tableName
 }
 
 func convertValue(value string, valueType string) (interface{}, error) {
@@ -323,4 +324,8 @@ func executeGetQuery(rs *sql.Rows, tableData []FieldMetaData) ([]map[string]inte
 	}
 
 	return result, nil
+}
+
+func getAndFormatFieldNamesForQuery(table string, d *DbExplorer) string {
+	return strings.Join(extractFieldNames(d.Data[table]), "`, `")
 }
