@@ -39,6 +39,7 @@ type DbExplorer struct {
 
 func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	queryParams := r.URL.RawQuery
 	method := r.Method
 	if path == "/" && method == http.MethodGet {
 		writeTables(w, d.TableNames)
@@ -52,15 +53,15 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if method == http.MethodGet && afterTable == "" {
+	if method == http.MethodGet && afterTable == "" && queryParams == "" {
 		err := getRows(tableName, d, w)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
 
-	if method == http.MethodGet && d.LimitOffsetRegexp.MatchString(afterTable) {
-		err := getWithLimitAndOffset(tableName, afterTable, d)
+	if method == http.MethodGet && d.LimitOffsetRegexp.MatchString(queryParams) {
+		err := getWithLimitAndOffset(tableName, afterTable, d, w)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -86,104 +87,69 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 	tableData := d.Data[table]
-	fieldNames := make([]string, len(tableData))
-	for i, datum := range tableData {
-		fieldNames[i] = datum.Field
-	}
+	fieldNames := extractFieldNames(tableData)
 
 	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, strings.Join(fieldNames, "`, `"), table))
 	if err != nil {
 		return err
 	}
-	defer rs.Close()
-
-	countOfFields := len(tableData)
-
-	result := make([]map[string]interface{}, 0)
-	for rs.Next() {
-		convertedRs := make([]interface{}, countOfFields)
-		convertedRsPointers := make([]interface{}, countOfFields)
-		for i := range convertedRsPointers {
-			convertedRsPointers[i] = &convertedRs[i]
-		}
-		err := rs.Scan(convertedRsPointers...)
-		if err != nil {
-			return err
-		}
-
-		for i := range convertedRs {
-			if convertedRs[i] != nil {
-				value, err := convertValue(string(convertedRs[i].([]byte)), tableData[i].Type)
-				if err != nil {
-					return err
-				}
-				convertedRs[i] = value
-			} else {
-				convertedRs[i] = nil
-			}
-		}
-
-		resultMap := make(map[string]interface{}, countOfFields)
-		for i, row := range convertedRs {
-			resultMap[fieldNames[i]] = row
-		}
-		result = append(result, resultMap)
-
-		fmt.Sprintf("")
+	result, err := executeGetQuery(rs, tableData)
+	rs.Close()
+	if err != nil {
+		return err
 	}
 
 	writeRecords(w, result)
 	return nil
 }
 
-func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer) error {
-	limit, err := extractLimitOrOffset(limitAndOffset, "limit")
+func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer, w http.ResponseWriter) error {
+	limit, err := extractLimitOrOffset(limitAndOffset, "limit", " LIMIT %d")
 	if err != nil {
 		return err
 	}
-	offset, err := extractLimitOrOffset(limitAndOffset, "offset")
+	offset, err := extractLimitOrOffset(limitAndOffset, "offset", " OFFSET %d")
 	if err != nil {
 		return err
 	}
 
-	rs, err := d.DB.Query(fmt.Sprintf(d.LimitOffsetQuery, table), limit, offset)
+	rs, err := d.DB.Query(fmt.Sprintf(d.LimitOffsetQuery, table, limit, offset))
 	if err != nil {
 		return err
 	}
-	defer rs.Close()
-
-	var res interface{}
-	for rs.Next() {
-		rs.Scan(&res)
-		fmt.Sprintf("")
+	result, err := executeGetQuery(rs, d.Data[table])
+	if err != nil {
+		return err
 	}
+	rs.Close()
 
+	writeRecords(w, result)
 	return nil
 }
 
-func extractLimitOrOffset(limitAndOffset string, targetName string) (int, error) {
+func extractLimitOrOffset(limitAndOffset string, targetName string, resultTemplate string) (string, error) {
 	var targetValue int
 	targetIndex := strings.Index(limitAndOffset, targetName)
 	if targetIndex == -1 {
-		return -1, nil
+		return "", nil
 	}
-	cutLimit := limitAndOffset[len(targetName)+1:]
-	ampersandIndex := strings.Index(cutLimit, "&")
+	cutTarget := limitAndOffset[len(targetName)+1:]
+	ampersandIndex := strings.Index(cutTarget, "&")
 	if ampersandIndex == -1 {
 		var err error
-		targetValue, err = strconv.Atoi(cutLimit)
+		targetValue, err = strconv.Atoi(cutTarget)
 		if err != nil {
-			return -1, err
+			return "", err
 		}
 	} else {
 		var err error
-		targetValue, err = strconv.Atoi(cutLimit[:ampersandIndex])
+		targetValue, err = strconv.Atoi(cutTarget[:ampersandIndex])
 		if err != nil {
-			return -1, err
+			return "", err
 		}
 	}
 
-	return targetValue, nil
+	return fmt.Sprintf(resultTemplate, targetValue), nil
 }
 
 func extractFuncName(path string) string {
@@ -234,7 +200,7 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		fieldsRs.Close()
 	}
 
-	limitOffset, err := regexp.Compile("^/\\?limit=\\d+&offset=\\d+$")
+	limitOffset, err := regexp.Compile("^(limit=\\d|offset=\\d){1}(&limit=\\d|&offset=\\d)?$")
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +217,8 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		LimitOffsetRegexp: limitOffset,
 		ByIdRegexp:        byId,
 		GetQuery:          "SELECT `%s` FROM `%s`",
-		LimitOffsetQuery:  "SELECT * FROM `%s` LIMIT ? OFFSET ?",
-		GetByIdQuery:      "SELECT * FROM `%s` WHERE `%s` = ?",
+		LimitOffsetQuery:  "SELECT `%s` FROM `%s` `%s` `%s`",
+		GetByIdQuery:      "SELECT `%s` FROM `%s` WHERE `%s` = ?",
 	}, nil
 }
 
@@ -261,16 +227,6 @@ func writeTables(w http.ResponseWriter, tables []string) {
 		Tables []string `json:"tables"`
 	}{tables}
 	writeResponse(w, response)
-}
-
-func extractTableNames(data map[string][]FieldMetaData) []string {
-	tables := make([]string, 0, len(data))
-	i := 0
-	for k, _ := range data {
-		tables = append(tables, k)
-		i++
-	}
-	return tables
 }
 
 func writeError(w http.ResponseWriter, error string, statusCode int) {
@@ -294,6 +250,24 @@ func writeResponse(w http.ResponseWriter, response interface{}) {
 	w.Write(bytes)
 }
 
+func extractTableNames(data map[string][]FieldMetaData) []string {
+	tables := make([]string, 0, len(data))
+	i := 0
+	for k, _ := range data {
+		tables = append(tables, k)
+		i++
+	}
+	return tables
+}
+
+func extractFieldNames(tableData []FieldMetaData) []string {
+	fieldNames := make([]string, len(tableData))
+	for i, datum := range tableData {
+		fieldNames[i] = datum.Field
+	}
+	return fieldNames
+}
+
 func convertValue(value string, valueType string) (interface{}, error) {
 	if strings.Contains(valueType, "int") {
 		atoi, err := strconv.Atoi(value)
@@ -311,4 +285,42 @@ func convertValue(value string, valueType string) (interface{}, error) {
 	}
 
 	return value, nil
+}
+
+func executeGetQuery(rs *sql.Rows, tableData []FieldMetaData) ([]map[string]interface{}, error) {
+	countOfFields := len(tableData)
+	result := make([]map[string]interface{}, 0)
+	for rs.Next() {
+		convertedRs := make([]interface{}, countOfFields)
+		convertedRsPointers := make([]interface{}, countOfFields)
+		for i := range convertedRsPointers {
+			convertedRsPointers[i] = &convertedRs[i]
+		}
+		err := rs.Scan(convertedRsPointers...)
+		if err != nil {
+			return nil, err
+		}
+
+		for i := range convertedRs {
+			if convertedRs[i] != nil {
+				value, err := convertValue(string(convertedRs[i].([]byte)), tableData[i].Type)
+				if err != nil {
+					return nil, err
+				}
+				convertedRs[i] = value
+			} else {
+				convertedRs[i] = nil
+			}
+		}
+
+		resultMap := make(map[string]interface{}, countOfFields)
+		for i, row := range convertedRs {
+			resultMap[tableData[i].Field] = row
+		}
+		result = append(result, resultMap)
+
+		fmt.Sprintf("")
+	}
+
+	return result, nil
 }
