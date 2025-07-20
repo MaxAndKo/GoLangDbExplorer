@@ -17,13 +17,13 @@ import (
 type FieldMetaData struct {
 	Field      string
 	Type       string
-	Collation  bool
-	Null       string
-	Key        string
-	Default    string
-	Extra      string
-	Privileges string
-	Comment    string
+	Collation  sql.NullString
+	Null       sql.NullString
+	Key        sql.NullString
+	Default    sql.NullString
+	Extra      sql.NullString
+	Privileges sql.NullString
+	Comment    sql.NullString
 }
 
 type DbExplorer struct {
@@ -68,7 +68,10 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if method == http.MethodGet && d.ByIdRegexp.MatchString(afterTable) {
-		//getById()
+		err := getById(tableName, d, w, afterTable)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 
 	if method == http.MethodPut {
@@ -85,13 +88,40 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath string) error {
+	id, err := strconv.Atoi(restOfPath[1:])
+	if err != nil {
+		writeError(w, err.Error(), http.StatusBadRequest)
+	}
+
+	var idFieeldName string
+	for _, data := range d.Data[table] {
+		if data.Key.String == "PRI" {
+			idFieeldName = data.Field
+			break
+		}
+	}
+
+	rs, err := d.DB.Query(fmt.Sprintf(d.GetByIdQuery, getAndFormatFieldNamesForQuery(table, d), table, idFieeldName), id)
+	if err != nil {
+		return err
+	}
+	result, err := executeGetQuery(rs, d.Data[table])
+	rs.Close()
+	if err != nil {
+		return err
+	}
+
+	writeRecord(w, result[0])
+	return nil
+}
+
 func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
-	tableData := d.Data[table]
 	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, getAndFormatFieldNamesForQuery(table, d), table))
 	if err != nil {
 		return err
 	}
-	result, err := executeGetQuery(rs, tableData)
+	result, err := executeGetQuery(rs, d.Data[table])
 	rs.Close()
 	if err != nil {
 		return err
@@ -152,11 +182,14 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		fieldMetaData := make([]FieldMetaData, 0)
 		for fieldsRs.Next() {
 			field := FieldMetaData{}
-			fieldsRs.Scan(
+			err := fieldsRs.Scan(
 				&field.Field, &field.Type, &field.Collation,
 				&field.Null, &field.Key, &field.Default,
 				&field.Extra, &field.Privileges, &field.Comment,
 			)
+			if err != nil {
+				return nil, err
+			}
 			fieldMetaData = append(fieldMetaData, field)
 		}
 		tablesData[tableName] = fieldMetaData
@@ -200,6 +233,13 @@ func writeRecords(w http.ResponseWriter, records []map[string]interface{}) {
 	response := struct {
 		Tables []map[string]interface{} `json:"records"`
 	}{records}
+	writeResponse(w, response)
+}
+
+func writeRecord(w http.ResponseWriter, record map[string]interface{}) {
+	response := struct {
+		Tables map[string]interface{} `json:"record"`
+	}{record}
 	writeResponse(w, response)
 }
 
@@ -293,18 +333,19 @@ func executeGetQuery(rs *sql.Rows, tableData []FieldMetaData) ([]map[string]inte
 	result := make([]map[string]interface{}, 0)
 	for rs.Next() {
 		convertedRs := make([]interface{}, countOfFields)
+		unconvertedRs := make([][]byte, countOfFields)
 		convertedRsPointers := make([]interface{}, countOfFields)
 		for i := range convertedRsPointers {
-			convertedRsPointers[i] = &convertedRs[i]
+			convertedRsPointers[i] = &unconvertedRs[i]
 		}
 		err := rs.Scan(convertedRsPointers...)
 		if err != nil {
 			return nil, err
 		}
 
-		for i := range convertedRs {
-			if convertedRs[i] != nil {
-				value, err := convertValue(string(convertedRs[i].([]byte)), tableData[i].Type)
+		for i := range unconvertedRs {
+			if unconvertedRs[i] != nil {
+				value, err := convertValue(string(unconvertedRs[i]), tableData[i].Type)
 				if err != nil {
 					return nil, err
 				}
