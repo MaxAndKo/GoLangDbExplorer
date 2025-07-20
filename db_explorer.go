@@ -121,7 +121,11 @@ func deleteRow(table string, d *DbExplorer, w http.ResponseWriter, restOfPath st
 	}
 	res.Next()
 	var deleted int
-	res.Scan(&deleted)
+	err = res.Scan(&deleted)
+	if err != nil {
+		return err
+	}
+	res.Close()
 
 	writeResponse(w, struct {
 		Updated int `json:"deleted"`
@@ -164,7 +168,11 @@ func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, 
 	}
 	res.Next()
 	var updated int
-	res.Scan(&updated)
+	err = res.Scan(&updated)
+	if err != nil {
+		return err
+	}
+	res.Close()
 
 	writeResponse(w, struct {
 		Updated int `json:"updated"`
@@ -197,6 +205,7 @@ func createRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte) 
 	if err != nil {
 		return err
 	}
+	rs.Close()
 
 	writeResponse(w, struct {
 		Id int `json:"id"`
@@ -432,7 +441,7 @@ func extractLimitOrOffset(limitAndOffset string, targetName string, defaultValue
 	if targetIndex == -1 {
 		return fmt.Sprintf(resultTemplate, defaultValue), nil
 	}
-	cutTarget := limitAndOffset[len(targetName)+1:]
+	cutTarget := limitAndOffset[len(targetName)+targetIndex+1:]
 	ampersandIndex := strings.Index(cutTarget, "&")
 	if ampersandIndex == -1 {
 		var err error

@@ -226,7 +226,7 @@ func TestApis(t *testing.T) {
 			},
 		},
 		Case{
-			Path:   "/items/2",
+			Path:   "/items/3",
 			Method: http.MethodPost,
 			Body: CR{
 				"description": "Написать программу db_crud",
