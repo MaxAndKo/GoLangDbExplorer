@@ -105,7 +105,7 @@ func TestApis(t *testing.T) {
 	ts := httptest.NewServer(handler)
 
 	cases := []Case{
-		/*Case{
+		Case{
 			Path: "/", // список таблиц
 			Result: CR{
 				"response": CR{
@@ -140,7 +140,7 @@ func TestApis(t *testing.T) {
 					},
 				},
 			},
-		},*/
+		},
 		Case{
 			Path:  "/items",
 			Query: "limit=1",
@@ -157,7 +157,7 @@ func TestApis(t *testing.T) {
 				},
 			},
 		},
-		/*Case{
+		Case{
 			Path:  "/items",
 			Query: "limit=1&offset=1",
 			Result: CR{
@@ -226,7 +226,7 @@ func TestApis(t *testing.T) {
 			},
 		},
 		Case{
-			Path:   "/items/3",
+			Path:   "/items/2",
 			Method: http.MethodPost,
 			Body: CR{
 				"description": "Написать программу db_crud",
@@ -494,7 +494,7 @@ func TestApis(t *testing.T) {
 					},
 				},
 			},
-		},*/
+		},
 	}
 
 	runCases(t, ts, db, cases)

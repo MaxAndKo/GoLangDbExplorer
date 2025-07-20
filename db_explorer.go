@@ -38,6 +38,7 @@ type DbExplorer struct {
 	GetByIdQuery      string
 	InsertQuery       string
 	UpdateQuery       string
+	DeleteQuery       string
 }
 
 func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -96,9 +97,36 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if method == http.MethodDelete && d.ByIdRegexp.MatchString(afterTable) {
-		//deleteRow()
+		deleteRow(tableName, d, w, afterTable)
+	}
+}
+
+func deleteRow(table string, d *DbExplorer, w http.ResponseWriter, restOfPath string) error {
+	idForDelete, err := strconv.Atoi(restOfPath[1:])
+	if err != nil {
+		return err
 	}
 
+	idFieldName := getPrimaryKey(table, d)
+
+	query := fmt.Sprintf(d.DeleteQuery, table, idFieldName)
+	_, err = d.DB.Query(query, idForDelete)
+	if err != nil {
+		return err
+	}
+
+	res, err := d.DB.Query("SELECT ROW_COUNT()")
+	if err != nil {
+		return err
+	}
+	res.Next()
+	var deleted int
+	res.Scan(&deleted)
+
+	writeResponse(w, struct {
+		Updated int `json:"deleted"`
+	}{deleted})
+	return nil
 }
 
 func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, restOfPath string) error {
@@ -130,9 +158,17 @@ func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, 
 		return err
 	}
 
+	res, err := d.DB.Query("SELECT ROW_COUNT()")
+	if err != nil {
+		return err
+	}
+	res.Next()
+	var updated int
+	res.Scan(&updated)
+
 	writeResponse(w, struct {
 		Updated int `json:"updated"`
-	}{1})
+	}{updated})
 	return nil
 }
 
@@ -196,13 +232,7 @@ func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath stri
 		writeError(w, err.Error(), http.StatusBadRequest)
 	}
 
-	var idFieeldName string
-	for _, data := range d.Data[table] {
-		if data.Key.String == "PRI" {
-			idFieeldName = data.Field
-			break
-		}
-	}
+	idFieeldName := getPrimaryKey(table, d)
 
 	rs, err := d.DB.Query(fmt.Sprintf(d.GetByIdQuery, getAndFormatFieldNamesForQuery(table, d), table, idFieeldName), id)
 	if err != nil {
@@ -221,6 +251,17 @@ func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath stri
 
 	writeRecord(w, result[0])
 	return nil
+}
+
+func getPrimaryKey(table string, d *DbExplorer) string {
+	var idFieeldName string
+	for _, data := range d.Data[table] {
+		if data.Key.String == "PRI" {
+			idFieeldName = data.Field
+			break
+		}
+	}
+	return idFieeldName
 }
 
 func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
@@ -324,6 +365,7 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		GetByIdQuery:      "SELECT `%s` FROM `%s` WHERE `%s` = ?",
 		InsertQuery:       "INSERT INTO `%s` (`%s`) VALUES (%s) RETURNING `%s`",
 		UpdateQuery:       "UPDATE `%s` SET %s WHERE `%s` = ?",
+		DeleteQuery:       "DELETE FROM `%s` WHERE `%s` = ?",
 	}, nil
 }
 
