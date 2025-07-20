@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -35,6 +36,7 @@ type DbExplorer struct {
 	GetQuery          string
 	LimitOffsetQuery  string
 	GetByIdQuery      string
+	InsertQuery       string
 }
 
 func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +77,12 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if method == http.MethodPut {
-		//putRow()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
+		r.Body.Close()
+		createRow(tableName, d, w, body)
 	}
 
 	if method == http.MethodPost && d.ByIdRegexp.MatchString(afterTable) {
@@ -86,6 +93,57 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		//deleteRow()
 	}
 
+}
+
+func createRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte) error {
+	input := make(map[string]interface{})
+	err := json.Unmarshal(body, &input)
+	if err != nil {
+		return err
+	}
+
+	data := d.Data[table]
+
+	forInsertFieldNames := make([]string, 0)
+	forInsertFieldValues := make([]string, 0)
+	var idFieldName string
+	for _, datum := range data {
+		value, exists := input[datum.Field]
+		if exists && datum.Extra.String != "auto_increment" {
+			forInsertFieldNames = append(forInsertFieldNames, datum.Field)
+			if strings.Contains(datum.Type, "text") || strings.Contains(datum.Type, "var") {
+				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("'%v'", value))
+			} else {
+				forInsertFieldValues = append(forInsertFieldValues, fmt.Sprintf("%v", value))
+			}
+		}
+		if datum.Key.String == "PRI" {
+			idFieldName = datum.Field
+		}
+	}
+
+	query := fmt.Sprintf(d.InsertQuery,
+		table,
+		strings.Join(forInsertFieldNames, "`, `"),
+		strings.Join(forInsertFieldValues, ", "),
+		idFieldName)
+	rs, err := d.DB.Query(query)
+	if err != nil {
+		return err
+	}
+
+	var resultId int
+	rs.Next()
+	err = rs.Scan(&resultId)
+	if err != nil {
+		return err
+	}
+
+	writeResponse(w, struct {
+		Id int `json:"id"`
+	}{resultId})
+
+	return nil
 }
 
 func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath string) error {
@@ -106,7 +164,7 @@ func getById(table string, d *DbExplorer, w http.ResponseWriter, restOfPath stri
 	if err != nil {
 		return err
 	}
-	result, err := executeGetQuery(rs, d.Data[table])
+	result, err := processRs(rs, d.Data[table])
 	rs.Close()
 	if err != nil {
 		return err
@@ -126,7 +184,7 @@ func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 	if err != nil {
 		return err
 	}
-	result, err := executeGetQuery(rs, d.Data[table])
+	result, err := processRs(rs, d.Data[table])
 	rs.Close()
 	if err != nil {
 		return err
@@ -152,7 +210,7 @@ func getWithLimitAndOffset(table string, limitAndOffset string, d *DbExplorer, w
 	if err != nil {
 		return err
 	}
-	result, err := executeGetQuery(rs, d.Data[table])
+	result, err := processRs(rs, d.Data[table])
 	if err != nil {
 		return err
 	}
@@ -220,6 +278,7 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		GetQuery:          "SELECT `%s` FROM `%s`",
 		LimitOffsetQuery:  "SELECT `%s` FROM `%s` %s %s",
 		GetByIdQuery:      "SELECT `%s` FROM `%s` WHERE `%s` = ?",
+		InsertQuery:       "INSERT INTO `%s` (`%s`) VALUES (%s) RETURNING `%s`",
 	}, nil
 }
 
@@ -336,7 +395,7 @@ func convertValue(value string, valueType string) (interface{}, error) {
 	return value, nil
 }
 
-func executeGetQuery(rs *sql.Rows, tableData []FieldMetaData) ([]map[string]interface{}, error) {
+func processRs(rs *sql.Rows, tableData []FieldMetaData) ([]map[string]interface{}, error) {
 	countOfFields := len(tableData)
 	result := make([]map[string]interface{}, 0)
 	for rs.Next() {
