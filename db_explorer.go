@@ -41,7 +41,7 @@ func (d *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	method := r.Method
 	if path == "/" && method == http.MethodGet {
-		d.writeTables(w)
+		writeTables(w, d.TableNames)
 		return
 	}
 
@@ -91,7 +91,7 @@ func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 		fieldNames[i] = datum.Field
 	}
 
-	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, strings.Join(fieldNames, ", "), table))
+	rs, err := d.DB.Query(fmt.Sprintf(d.GetQuery, strings.Join(fieldNames, "`, `"), table))
 	if err != nil {
 		return err
 	}
@@ -113,7 +113,11 @@ func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 
 		for i := range convertedRs {
 			if convertedRs[i] != nil {
-				convertedRs[i] = string(convertedRs[i].([]byte))
+				value, err := convertValue(string(convertedRs[i].([]byte)), tableData[i].Type)
+				if err != nil {
+					return err
+				}
+				convertedRs[i] = value
 			} else {
 				convertedRs[i] = nil
 			}
@@ -128,12 +132,7 @@ func getRows(table string, d *DbExplorer, w http.ResponseWriter) error {
 		fmt.Sprintf("")
 	}
 
-	marshal, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-
-	w.Write(marshal) //TODO писать в response - выделить общий метод для этого
+	writeRecords(w, result)
 	return nil
 }
 
@@ -251,22 +250,17 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 		TableNames:        extractTableNames(tablesData),
 		LimitOffsetRegexp: limitOffset,
 		ByIdRegexp:        byId,
-		GetQuery:          "SELECT %s FROM `%s`",
+		GetQuery:          "SELECT `%s` FROM `%s`",
 		LimitOffsetQuery:  "SELECT * FROM `%s` LIMIT ? OFFSET ?",
 		GetByIdQuery:      "SELECT * FROM `%s` WHERE `%s` = ?",
 	}, nil
 }
 
-func (d *DbExplorer) writeTables(w http.ResponseWriter) {
-	bytes, err := json.Marshal(struct {
-		Response interface{} `json:"response"`
-	}{struct {
+func writeTables(w http.ResponseWriter, tables []string) {
+	response := struct {
 		Tables []string `json:"tables"`
-	}{d.TableNames}})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-	w.Write(bytes)
+	}{tables}
+	writeResponse(w, response)
 }
 
 func extractTableNames(data map[string][]FieldMetaData) []string {
@@ -281,4 +275,40 @@ func extractTableNames(data map[string][]FieldMetaData) []string {
 
 func writeError(w http.ResponseWriter, error string, statusCode int) {
 	http.Error(w, error, statusCode)
+}
+
+func writeRecords(w http.ResponseWriter, records []map[string]interface{}) {
+	response := struct {
+		Tables []map[string]interface{} `json:"records"`
+	}{records}
+	writeResponse(w, response)
+}
+
+func writeResponse(w http.ResponseWriter, response interface{}) {
+	bytes, err := json.Marshal(struct {
+		Response interface{} `json:"response"`
+	}{response})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	w.Write(bytes)
+}
+
+func convertValue(value string, valueType string) (interface{}, error) {
+	if strings.Contains(valueType, "int") {
+		atoi, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, err
+		}
+		return atoi, nil
+	}
+	if strings.Contains(valueType, "float") {
+		atoi, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return nil, err
+		}
+		return atoi, nil
+	}
+
+	return value, nil
 }
