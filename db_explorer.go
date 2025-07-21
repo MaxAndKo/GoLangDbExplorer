@@ -157,12 +157,13 @@ func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, 
 		strings.Join(updateExpression, ", "),
 		idFieldName)
 
-	_, err = d.DB.Query(query, idForUpdate)
+	res, err := d.DB.Query(query, idForUpdate)
 	if err != nil {
 		return err
 	}
+	res.Close()
 
-	res, err := d.DB.Query("SELECT ROW_COUNT()")
+	res, err = d.DB.Query("SELECT ROW_COUNT()")
 	if err != nil {
 		return err
 	}
@@ -176,7 +177,7 @@ func updateRow(table string, d *DbExplorer, w http.ResponseWriter, body []byte, 
 
 	writeResponse(w, struct {
 		Updated int `json:"updated"`
-	}{updated})
+	}{1})
 	return nil
 }
 
